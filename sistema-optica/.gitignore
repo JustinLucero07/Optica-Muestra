@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*/venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
+
+# Env
+.env
+.env.local
+.env.prod
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Postgres data
+pgdata/
+
+deploy/.env
+
+# Respaldos de la base de datos (datos de clientes)
+deploy/respaldos/

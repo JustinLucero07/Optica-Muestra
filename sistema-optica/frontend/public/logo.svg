@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 64" role="img" aria-label="Óptica">
+  <rect x="0" y="4" width="56" height="56" rx="14" fill="#0d9ead"/>
+  <g transform="translate(4 8)" fill="none" stroke="#fff" stroke-linecap="round">
+    <path d="M6.5 22 L4 15.5" stroke-width="2.6"/>
+    <path d="M41.5 22 L44 15.5" stroke-width="2.6"/>
+    <circle cx="15" cy="24.5" r="8.5" stroke-width="2.8"/>
+    <circle cx="33" cy="24.5" r="8.5" stroke-width="2.8"/>
+    <path d="M23.4 23.1 Q24 20.9 24.6 23.1" stroke-width="2.6"/>
+    <path d="M10.8 22.7 A4.6 4.6 0 0 1 14 19.5" stroke-width="1.8" opacity=".6"/>
+    <path d="M28.8 22.7 A4.6 4.6 0 0 1 32 19.5" stroke-width="1.8" opacity=".6"/>
+  </g>
+  <text x="72" y="40" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="30" font-weight="800" letter-spacing="1" fill="#0f172a">Óptica</text>
+  <text x="73" y="56" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="10.5" font-weight="600" letter-spacing="3" fill="#0d9ead">SISTEMA DE GESTIÓN</text>
+</svg>

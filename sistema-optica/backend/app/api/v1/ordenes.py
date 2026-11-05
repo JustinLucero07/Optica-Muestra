@@ -1,0 +1,357 @@
+import logging
+from datetime import date
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select, func
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+from app.core.config import settings
+from app.core.db import get_db
+from app.core.auditoria import auditar, cambios
+from app.core.deps import get_current_user, require_roles
+from app.core.numeradores import siguiente_numero
+from app.models.agenda import OrdenTrabajo
+from app.models.producto import MovimientoInventario, Producto
+from app.models.user import User
+from app.schemas.agenda import OrdenCreate, OrdenFacturar, OrdenOut, OrdenUpdate
+from app.schemas.tesoreria import CobroCreate
+from app.schemas.ventas import VentaCreate, VentaItemIn
+
+router = APIRouter(prefix="/ordenes", tags=["ordenes"])
+
+
+@router.get("", response_model=list[OrdenOut])
+def listar_ordenes(
+    paciente_id: int | None = None,
+    estado: str | None = None,
+    venta_id: int | None = None,
+    desde: date | None = None,
+    hasta: date | None = None,
+    sin_venta: bool | None = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    stmt = select(OrdenTrabajo).order_by(OrdenTrabajo.id.desc())
+    if sin_venta:
+        # "Sin facturar": sin venta y no rechazadas
+        stmt = stmt.where(OrdenTrabajo.venta_id.is_(None), OrdenTrabajo.estado != "rechazado")
+
+    if paciente_id:
+        stmt = stmt.where(OrdenTrabajo.paciente_id == paciente_id)
+    if estado:
+        stmt = stmt.where(OrdenTrabajo.estado == estado)
+    if venta_id:
+        stmt = stmt.where(OrdenTrabajo.venta_id == venta_id)
+    if desde:
+        stmt = stmt.where(OrdenTrabajo.fecha_envio >= desde)
+    if hasta:
+        stmt = stmt.where(OrdenTrabajo.fecha_envio <= hasta)
+    return db.execute(stmt.offset(skip).limit(limit)).scalars().all()
+
+
+@router.get("/count")
+def contar_ordenes(
+    excluir_estados: str | None = None,
+    sin_venta: bool | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    stmt = select(func.count()).select_from(OrdenTrabajo)
+    if sin_venta:
+        stmt = stmt.where(OrdenTrabajo.venta_id.is_(None), OrdenTrabajo.estado != "rechazado")
+    if excluir_estados:
+        for s in excluir_estados.split(","):
+            stmt = stmt.where(OrdenTrabajo.estado != s.strip())
+
+    return {"total": db.execute(stmt).scalar_one()}
+
+
+@router.post("", response_model=OrdenOut, status_code=status.HTTP_201_CREATED)
+def crear_orden(
+    body: OrdenCreate,
+    db: Session = Depends(get_db),
+    current: User = Depends(get_current_user),
+):
+    numero = siguiente_numero(db, "numerador_orden", "ORD", largo=5)
+    data = body.model_dump()
+    presupuesto_id = data.pop("presupuesto_id", None)
+    producto_id = data.get("producto_id")  # keep in data so it's stored in DB
+    presupuesto = None
+    if presupuesto_id:
+        from app.api.v1.ventas import tomar_presupuesto
+        presupuesto = tomar_presupuesto(db, presupuesto_id)
+    orden = OrdenTrabajo(**data, numero=numero)
+    db.add(orden)
+    if presupuesto:
+        db.flush()
+        presupuesto.estado = "convertido"
+        presupuesto.orden_id = orden.id
+
+    if producto_id and body.lab_proveedor == "Stock propio":
+        prod = db.get(Producto, producto_id)
+        if prod and prod.stock_actual > 0:
+            antes = prod.stock_actual
+            prod.stock_actual = antes - 1
+            db.add(MovimientoInventario(
+                producto_id=prod.id, tipo="salida", cantidad=1, stock_antes=antes,
+                stock_despues=prod.stock_actual, motivo="Orden de laboratorio (stock propio)",
+                referencia=numero, usuario_id=current.id,
+            ))
+
+    db.commit()
+    db.refresh(orden)
+    return orden
+
+
+@router.post("/{orden_id}/facturar", status_code=status.HTTP_201_CREATED)
+def facturar_orden(
+    orden_id: int,
+    body: OrdenFacturar,
+    db: Session = Depends(get_db),
+    current: User = Depends(require_roles("admin", "vendedor")),
+):
+    """Crea la venta de una orden, la vincula y (opcional) registra el cobro.
+
+    Todo ocurre en UNA transacción: si el cobro falla (p. ej. método de pago no
+    permitido para la cuenta) no queda ni la venta ni la orden marcada.
+    """
+    from app.api.v1.tesoreria import registrar_cobro
+    from app.api.v1.ventas import registrar_venta
+
+    orden = db.get(OrdenTrabajo, orden_id)
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    total = float(orden.precio_venta or 0)
+    if total <= 0:
+        raise HTTPException(status_code=422, detail="La orden no tiene precio de venta")
+
+    items: list[VentaItemIn] = []
+    p_arm = float(orden.precio_armazon or 0)
+    p_lun = float(orden.precio_lunas or 0)
+    if p_arm > 0:
+        ref = f" ({orden.armazon_ref})" if orden.armazon_ref else ""
+        # Igual que "Nueva venta": si el armazón/luna salió del inventario, la venta descuenta el stock
+        items.append(VentaItemIn(producto_id=orden.armazon_producto_id, descripcion=f"Armazón{ref}", cantidad=1, precio_unitario=p_arm))
+    if p_lun > 0:
+        items.append(VentaItemIn(producto_id=orden.luna_producto_id, descripcion=f"Lunas {orden.tipo}", cantidad=1, precio_unitario=p_lun))
+    resto = round(total - p_arm - p_lun, 2)
+    if resto > 0:
+        items.append(VentaItemIn(descripcion=f"Orden de laboratorio {orden.numero}", cantidad=1, precio_unitario=resto))
+
+    hoy = date.today()
+    venta = registrar_venta(db, VentaCreate(
+        paciente_id=orden.paciente_id, fecha=hoy, descuento=0,
+        notas=f"Generado desde orden {orden.numero}", items=items, orden_id=orden.id,
+    ), current)
+
+    cobro = None
+    if body.cobro:
+        monto = body.cobro.monto if body.cobro.monto is not None else float(venta.total)
+        if monto > float(venta.total):
+            raise HTTPException(status_code=422, detail="El cobro no puede superar el total de la venta")
+        cobro = registrar_cobro(db, CobroCreate(
+            venta_id=venta.id, paciente_id=orden.paciente_id,
+            cuenta_bancaria_id=body.cobro.cuenta_bancaria_id, fecha=hoy,
+            concepto=f"Cobro venta {venta.numero}", monto=monto,
+            metodo_pago=body.cobro.metodo_pago,
+        ), current)
+
+    db.commit()
+    return {
+        "venta_id": venta.id, "venta_numero": venta.numero, "total": float(venta.total),
+        "cobro_numero": cobro.numero if cobro else None,
+    }
+
+
+@router.get("/{orden_id}", response_model=OrdenOut)
+def obtener_orden(
+    orden_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    orden = db.get(OrdenTrabajo, orden_id)
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    return orden
+
+
+@router.put("/{orden_id}", response_model=OrdenOut)
+def actualizar_orden(
+    orden_id: int,
+    body: OrdenUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    orden = db.get(OrdenTrabajo, orden_id)
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(orden, k, v)
+    db.commit()
+    db.refresh(orden)
+    return orden
+
+
+@router.delete("/{orden_id}", status_code=204)
+def eliminar_orden(
+    orden_id: int,
+    db: Session = Depends(get_db),
+    current: User = Depends(require_roles("admin")),
+):
+    orden = db.get(OrdenTrabajo, orden_id)
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    if orden.venta_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"La orden {orden.numero} ya tiene venta. Anula la venta primero o marca la orden como rechazada.",
+        )
+
+    # Reponer stock si fue tomado de inventario propio
+    if orden.lab_proveedor == "Stock propio" and orden.producto_id:
+        prod = db.get(Producto, orden.producto_id)
+        if prod:
+            antes = prod.stock_actual
+            prod.stock_actual = antes + 1
+            db.add(MovimientoInventario(
+                producto_id=prod.id, tipo="entrada", cantidad=1, stock_antes=antes,
+                stock_despues=prod.stock_actual, motivo="Orden de laboratorio eliminada",
+                referencia=orden.numero, usuario_id=current.id,
+            ))
+
+    # Si la orden salió de un presupuesto, el presupuesto vuelve a estar disponible
+    from app.models.presupuesto import Presupuesto
+    for p in db.execute(select(Presupuesto).where(Presupuesto.orden_id == orden.id)).scalars():
+        p.orden_id = None
+        if not p.venta_id:
+            p.estado = "aceptado"
+
+    auditar(db, current, "eliminar", "orden", orden.id, orden.numero, orden.tipo)
+    db.delete(orden)
+    db.commit()
+
+
+@router.patch("/{orden_id}/estado", response_model=OrdenOut)
+def cambiar_estado(
+    orden_id: int,
+    estado: str = Query(...),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    ESTADOS = {"pendiente", "enviado", "en_proceso", "listo", "entregado", "rechazado"}
+    if estado not in ESTADOS:
+        raise HTTPException(status_code=422, detail=f"Estado inválido. Opciones: {ESTADOS}")
+    orden = db.get(OrdenTrabajo, orden_id)
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    orden.estado = estado
+    db.commit()
+    db.refresh(orden)
+
+    # WhatsApp al paciente cuando la orden está lista para retirar
+    if estado == "listo" and orden.paciente_id:
+        try:
+            from app.services import whatsapp
+            from app.models.paciente import Paciente
+            pac = db.get(Paciente, orden.paciente_id)
+            if pac and pac.telefono:
+                whatsapp.send_template(
+                    pac.telefono,
+                    settings.WA_ORDEN_TEMPLATE,
+                    settings.WA_ORDEN_LANG,
+                    components=[{"type": "body", "parameters": [
+                        {"type": "text", "text": pac.nombres},
+                        {"type": "text", "text": orden.numero},
+                    ]}],
+                )
+        except Exception as exc:
+            logger.warning("WhatsApp orden lista: %s", exc)
+
+    return orden
+
+
+@router.post("/{orden_id}/whatsapp-lab", status_code=200)
+def enviar_whatsapp_lab(
+    orden_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Envía los detalles de la orden al WhatsApp del laboratorio via Cloud API."""
+    from app.services import whatsapp
+    from app.models.paciente import Paciente
+    import re
+
+    orden = db.get(OrdenTrabajo, orden_id)
+    if not orden:
+        raise HTTPException(status_code=404, detail="Orden no encontrada")
+    if not orden.lab_telefono:
+        raise HTTPException(status_code=422, detail="La orden no tiene teléfono de laboratorio")
+
+    pac = db.get(Paciente, orden.paciente_id) if orden.paciente_id else None
+    pac_nombre = f"{pac.apellidos} {pac.nombres}".strip() if pac else f"Paciente #{orden.paciente_id}"
+
+    def fmtRxLine(text: str) -> str:
+        parts = []
+        for m in re.finditer(r'(esf|cil|eje|add|dnp|prisma|dp)[\s:]+([+-]?\d+(?:[.,]\d+)?)', text, re.I):
+            lbl = m.group(1).upper()
+            raw = m.group(2)
+            try:
+                n = float(raw.replace(",", "."))
+                val = (f"+{n:.2f}" if n >= 0 else f"{n:.2f}") if lbl not in ("EJE", "DNP", "PRISMA", "DP") else raw
+            except ValueError:
+                val = raw
+            parts.append(f"{lbl}: {val}")
+        return "  ".join(parts)
+
+    rx_lines: list[str] = []
+    for ln in [l.strip() for l in (orden.descripcion or "").splitlines() if l.strip()]:
+        ll = ln.lower()
+        if ll.startswith("od:"):
+            rx_lines.append(f"OD ▸ {fmtRxLine(ln)}")
+        elif ll.startswith("oi:"):
+            rx_lines.append(f"OI ▸ {fmtRxLine(ln)}")
+        elif ll.startswith(("material:", "tratamiento:", "diseño:", "diagnóstico:", "dp:")):
+            rx_lines.append(f"  {ln}")
+
+    armazon_parts = []
+    if orden.armazon_ref: armazon_parts.append(f"Ref: {orden.armazon_ref}")
+    if orden.armazon_color: armazon_parts.append(f"Color: {orden.armazon_color}")
+    if orden.armazon_talla: armazon_parts.append(f"Talla: {orden.armazon_talla}")
+
+    from app.models.configuracion import Configuracion
+    cfg_nombre = db.execute(
+        select(Configuracion).where(Configuracion.clave == "nombre_optica")
+    ).scalar_one_or_none()
+    nombre_optica = cfg_nombre.valor if cfg_nombre and cfg_nombre.valor else "Óptica"
+
+    msg_parts = [
+        f"*ORDEN DE TRABAJO — {orden.numero}*",
+        nombre_optica,
+        "",
+        f"*Paciente:* {pac_nombre}",
+        f"*Tipo:* {orden.tipo}",
+        f"*Fecha envío:* {orden.fecha_envio.strftime('%d/%m/%Y')}",
+    ]
+    if orden.fecha_entrega_est:
+        msg_parts.append(f"*Entrega estimada:* {orden.fecha_entrega_est.strftime('%d/%m/%Y')}")
+    msg_parts += ["", "*PRESCRIPCIÓN*"] + rx_lines
+    if armazon_parts:
+        msg_parts += ["", f"*Armazón:* {' | '.join(armazon_parts)}"]
+    if orden.notas:
+        msg_parts += ["", f"*Observaciones:* {orden.notas}"]
+    if orden.precio_lab:
+        msg_parts.append(f"*Precio lab acordado:* ${float(orden.precio_lab):.2f}")
+    msg_parts += ["", "Por favor confirmar recepción. Gracias 🙏"]
+
+    try:
+        result = whatsapp.send_text(orden.lab_telefono, "\n".join(msg_parts))
+        if orden.estado == "pendiente":
+            orden.estado = "enviado"
+            db.commit()
+        return {"ok": True, "wa_result": result}
+    except Exception as exc:
+        logger.error("Error WhatsApp lab %s: %s", orden_id, exc)
+        raise HTTPException(status_code=502, detail=f"Error enviando WhatsApp: {exc}")

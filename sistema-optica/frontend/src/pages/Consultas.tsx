@@ -1,0 +1,275 @@
+import { useState } from "react"
+import { Link, useNavigate } from "react-router-dom"
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { Search, Loader2, Stethoscope, Plus, Trash2, ChevronLeft, ChevronRight } from "lucide-react"
+import { toast } from "sonner"
+import { EmptyState } from "@/components/ui/empty-state"
+
+import { api } from "@/lib/api"
+import { errMsg } from "@/lib/errors"
+import { deleteWithUndo } from "@/lib/confirm"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
+import { Paginador } from "@/components/ui/Paginador"
+import { Dialog, DialogHeader, DialogBody, DialogFooter } from "@/components/ui/dialog"
+import PacienteCombobox from "@/components/PacienteCombobox"
+import { fmtDate, rangoMes, nombreMes } from "@/lib/format"
+
+
+function fmtRx(esf: number | null, cil: number | null, eje: number | null) {
+  if (esf == null && cil == null) return "—"
+  const e = esf != null ? (esf >= 0 ? `+${esf.toFixed(2)}` : esf.toFixed(2)) : ""
+  const c = cil != null ? (cil >= 0 ? ` +${cil.toFixed(2)}` : ` ${cil.toFixed(2)}`) : ""
+  const ax = eje != null ? ` x${eje}°` : ""
+  return `${e}${c}${ax}`
+}
+
+interface Consulta {
+  id: number
+  numero: string
+  fecha: string
+  paciente_id: number
+  paciente_nombre: string
+  motivo_consulta: string | null
+  diagnostico: string | null
+  rx_od_esf: number | null
+  rx_od_cil: number | null
+  rx_od_eje: number | null
+}
+
+const PAGE = 50
+
+
+export default function Consultas() {
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+  const [busqueda, setBusqueda] = useState("")
+  const [q, setQ] = useState("")
+  const [skip, setSkip] = useState(0)
+  const [perPage, setPerPage] = useState(15)
+  const [pageLocal, setPageLocal] = useState(1)
+  const [modalNueva, setModalNueva] = useState(false)
+  const [pacSelId, setPacSelId] = useState("")
+  const [mesOffset, setMesOffset] = useState(0)
+  const [desde, setDesde] = useState(() => rangoMes(0).desde)
+  const [hasta, setHasta] = useState(() => rangoMes(0).hasta)
+  function irAMes(offset: number) {
+    const r = rangoMes(offset)
+    setMesOffset(offset)
+    setDesde(r.desde)
+    setHasta(r.hasta)
+    setPageLocal(1)
+  }
+  function verTodo() {
+    setMesOffset(NaN)
+    setDesde("")
+    setHasta("")
+    setPageLocal(1)
+  }
+
+  const { data: consultas = [], isLoading } = useQuery<Consulta[]>({
+    queryKey: ["consultas-global", q, skip, desde, hasta],
+    queryFn: () =>
+      api.get("/consultas", { params: { q: q || undefined, desde: desde || undefined, hasta: hasta || undefined, skip, limit: PAGE } }).then(r => r.data),
+  })
+
+  const eliminarConsultaMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/consultas/consultas/${id}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["consultas-global"] }); toast.success("Consulta eliminada") },
+    onError: (e) => toast.error(errMsg(e, "Error al eliminar")),
+  })
+
+  function buscar() {
+    setQ(busqueda)
+    setSkip(0)
+    setPageLocal(1)
+  }
+
+  const filtradas = consultas.filter(c => {
+    if (desde && c.fecha < desde) return false
+    if (hasta && c.fecha > hasta) return false
+    return true
+  })
+
+  const paged = filtradas.slice((pageLocal - 1) * perPage, pageLocal * perPage)
+
+  return (
+    <div className="p-3 sm:p-6 space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <Stethoscope className="h-6 w-6" /> Consultas
+          </h1>
+        </div>
+        <Button onClick={() => { setPacSelId(""); setModalNueva(true) }}>
+          <Plus className="h-4 w-4 mr-1" /> Nueva consulta
+        </Button>
+      </div>
+
+      {/* Modal nueva consulta */}
+      <Dialog open={modalNueva} onClose={() => setModalNueva(false)} className="max-w-md">
+        <DialogHeader>
+          <h2 className="text-lg font-semibold">Nueva consulta</h2>
+        </DialogHeader>
+        <DialogBody>
+          <p className="text-sm text-muted-foreground mb-3">Selecciona el paciente para continuar.</p>
+          <PacienteCombobox
+            value={pacSelId}
+            onChange={id => setPacSelId(id)}
+          />
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setModalNueva(false)}>Cancelar</Button>
+          <Button
+            disabled={!pacSelId}
+            onClick={() => { setModalNueva(false); navigate(`/pacientes/${pacSelId}/consultas/nueva`) }}
+          >
+            Continuar →
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Búsqueda y filtros */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            className="pl-9 w-full"
+            placeholder="Paciente, cédula o número de consulta..."
+            value={busqueda}
+            onChange={e => setBusqueda(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && buscar()}
+          />
+        </div>
+        <Button onClick={buscar}>Buscar</Button>
+        <div className="flex items-center gap-1 border rounded-xl px-1">
+          <button onClick={() => irAMes((isNaN(mesOffset) ? 0 : mesOffset) - 1)} className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground">
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+          <span className="inline-block text-sm font-medium first-letter:uppercase px-1 min-w-[120px] text-center">
+            {isNaN(mesOffset) ? "Todos los meses" : nombreMes(mesOffset)}
+          </span>
+          <button onClick={() => irAMes((isNaN(mesOffset) ? 0 : mesOffset) + 1)} className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground">
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+        {mesOffset !== 0 && !isNaN(mesOffset) && (
+          <Button variant="outline" size="sm" onClick={() => irAMes(0)}>Mes actual</Button>
+        )}
+        {!isNaN(mesOffset) && (
+          <Button variant="ghost" size="sm" onClick={verTodo}>Ver todo</Button>
+        )}
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-xs text-muted-foreground">Desde</span>
+          <Input type="date" className="h-9 w-32 sm:w-36 text-sm rounded-xl" value={desde} onChange={e => { setDesde(e.target.value); setMesOffset(NaN); setPageLocal(1) }} />
+          <span className="text-xs text-muted-foreground">Hasta</span>
+          <Input type="date" className="h-9 w-32 sm:w-36 text-sm rounded-xl" value={hasta} onChange={e => { setHasta(e.target.value); setMesOffset(NaN); setPageLocal(1) }} />
+        </div>
+      </div>
+
+      {/* Tabla */}
+      {isLoading ? (
+        <div className="flex justify-center py-12">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      ) : (
+        <div className="bg-card rounded-2xl border shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-muted/40">
+                <th className="text-left px-4 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wide">N°</th>
+                <th className="text-left px-4 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wide">Fecha</th>
+                <th className="text-left px-4 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wide">Paciente</th>
+                <th className="text-left px-4 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wide">Motivo</th>
+                <th className="text-left px-4 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wide">Refracción OD</th>
+                <th className="text-left px-4 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wide">Diagnóstico</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/50">
+              {filtradas.length === 0 && (
+                <tr>
+                  <td colSpan={7}>
+                    <EmptyState
+                      icon={Stethoscope}
+                      title={q || desde || hasta ? "Sin resultados" : "Sin consultas registradas"}
+                      description={q || desde || hasta ? "Prueba con otros filtros o rangos de fecha" : "Registra la primera consulta para comenzar"}
+                      action={!q && !desde && !hasta ? { label: "Nueva consulta", onClick: () => navigate("/consultas/nueva") } : undefined}
+                    />
+                  </td>
+                </tr>
+              )}
+              {paged.map(c => (
+                <tr
+                  key={c.id}
+                  className="hover:bg-muted/30 transition-colors cursor-pointer table-row-anim"
+                  onClick={() => navigate(`/consultas/${c.id}`)}
+                >
+                  <td className="px-4 py-3">
+                    <Badge variant="outline" className="font-mono text-xs">{c.numero}</Badge>
+                  </td>
+                  <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
+                    {fmtDate(c.fecha)}
+                  </td>
+                  <td className="px-4 py-3 font-medium">
+                    <Link
+                      to={`/pacientes/${c.paciente_id}`}
+                      className="hover:underline underline-offset-2"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {c.paciente_nombre}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3 max-w-[200px] truncate text-muted-foreground">
+                    {c.motivo_consulta ?? "—"}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs">
+                    {fmtRx(c.rx_od_esf, c.rx_od_cil, c.rx_od_eje)}
+                  </td>
+                  <td className="px-4 py-3 max-w-[200px] truncate text-muted-foreground">
+                    {c.diagnostico ?? "—"}
+                  </td>
+                  <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                    <button
+                      title="Eliminar consulta"
+                      onClick={() => deleteWithUndo(`Consulta ${c.numero} eliminada`, () => eliminarConsultaMut.mutate(c.id))}
+                      className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        </div>
+      )}
+
+      {/* Paginación */}
+      <div className="rounded-md border">
+        <Paginador
+          page={pageLocal}
+          total={filtradas.length}
+          perPage={perPage}
+          onChange={p => {
+            if (p * perPage > filtradas.length && consultas.length === PAGE) {
+              setSkip(s => s + PAGE)
+              setPageLocal(1)
+            } else {
+              setPageLocal(p)
+            }
+          }}
+          onPerPageChange={n => { setPerPage(n); setPageLocal(1) }}
+        />
+      </div>
+      {consultas.length === PAGE && (
+        <p className="text-xs text-muted-foreground text-center">
+          Mostrando {skip + 1}–{skip + consultas.length} · hay más registros
+        </p>
+      )}
+    </div>
+  )
+}

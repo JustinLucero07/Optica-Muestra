@@ -1,0 +1,460 @@
+"""
+Importación de comprobantes electrónicos SRI (Ecuador).
+Endpoints:
+  POST /sri/importar-xml       → parsea XML, auto-matchea items con inventario, crea CxP
+  POST /sri/mapear-items        → guarda/actualiza mapeos codigo_proveedor → producto_id
+  GET  /sri/mapeos              → lista todos los mapeos existentes
+"""
+import xml.etree.ElementTree as ET
+from datetime import date, datetime
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from pydantic import BaseModel
+from sqlalchemy import select, or_
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.core.deps import get_current_user, require_roles
+from app.models.cxp_item import CxPItem
+from app.models.producto import MovimientoInventario, Producto
+from app.models.proveedor import Proveedor
+from app.models.sri_map import ProveedorProductoMap
+from app.models.tesoreria import CuentaPorPagar
+from app.models.user import User
+
+router = APIRouter(prefix="/sri", tags=["sri"])
+
+
+def _txt(parent: ET.Element | None, path: str, default: str = "") -> str:
+    if parent is None:
+        return default
+    el = parent.find(path)
+    return el.text.strip() if el is not None and el.text else default
+
+
+def _buscar_producto_por_codigo(db: Session, codigo: str) -> Producto | None:
+    """Busca en inventario por código exacto."""
+    if not codigo:
+        return None
+    return db.execute(
+        select(Producto).where(Producto.codigo == codigo, Producto.activo.is_(True))
+    ).scalar_one_or_none()
+
+
+def _match_item(db: Session, codigo: str, descripcion: str, proveedor_id: int | None) -> dict:
+    """Devuelve estado de matching para un item del XML."""
+    # 1. Buscar en tabla de mapeos (proveedor específico primero, luego genérico)
+    map_row = None
+    if proveedor_id:
+        map_row = db.execute(
+            select(ProveedorProductoMap).where(
+                ProveedorProductoMap.proveedor_id == proveedor_id,
+                ProveedorProductoMap.codigo_proveedor == codigo,
+            )
+        ).scalar_one_or_none()
+    if map_row is None and codigo:
+        map_row = db.execute(
+            select(ProveedorProductoMap).where(
+                ProveedorProductoMap.proveedor_id.is_(None),
+                ProveedorProductoMap.codigo_proveedor == codigo,
+            )
+        ).scalar_one_or_none()
+
+    if map_row:
+        prod = db.get(Producto, map_row.producto_id)
+        if prod and prod.activo:
+            return {
+                "match": "mapeado",
+                "producto_id": prod.id,
+                "producto_nombre": prod.nombre,
+                "producto_codigo": prod.codigo,
+            }
+
+    # 2. Buscar directamente por código en inventario
+    prod = _buscar_producto_por_codigo(db, codigo)
+    if prod:
+        return {
+            "match": "codigo_directo",
+            "producto_id": prod.id,
+            "producto_nombre": prod.nombre,
+            "producto_codigo": prod.codigo,
+        }
+
+    # 3. Intento fuzzy por nombre (si descripción coincide con nombre de producto)
+    if descripcion:
+        prod = db.execute(
+            select(Producto).where(
+                Producto.activo.is_(True),
+                or_(
+                    Producto.nombre.ilike(f"%{descripcion[:30]}%"),
+                    Producto.codigo.ilike(f"%{codigo}%") if codigo else Producto.nombre.ilike("%"),
+                )
+            ).limit(1)
+        ).scalar_one_or_none()
+        if prod:
+            return {
+                "match": "sugerido",
+                "producto_id": prod.id,
+                "producto_nombre": prod.nombre,
+                "producto_codigo": prod.codigo,
+            }
+
+    return {"match": "sin_match", "producto_id": None, "producto_nombre": None, "producto_codigo": None}
+
+
+def _aplicar_entrada_stock(db: Session, producto_id: int, cantidad: float, referencia: str, usuario_id: int) -> None:
+    """Suma `cantidad` al stock del producto y deja registro en movimientos_inventario."""
+    prod = db.get(Producto, producto_id)
+    if not prod or cantidad <= 0:
+        return
+    antes = float(prod.stock_actual)
+    prod.stock_actual = antes + cantidad
+    db.add(MovimientoInventario(
+        producto_id=producto_id, tipo="entrada", cantidad=cantidad,
+        stock_antes=antes, stock_despues=prod.stock_actual,
+        motivo="Compra — factura importada SRI", referencia=referencia,
+        usuario_id=usuario_id,
+    ))
+
+
+@router.post("/importar-xml")
+async def importar_xml(
+    file: UploadFile = File(...),
+    guardar: bool = True,
+    orden_id: int | None = None,
+    db: Session = Depends(get_db),
+    current: User = Depends(require_roles("admin", "cajero")),
+):
+    content = await file.read()
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as exc:
+        raise HTTPException(400, detail=f"XML inválido: {exc}")
+
+    # El SRI envía dos formatos:
+    # 1. XML directo: <factura>...</factura>
+    # 2. XML autorizado (del portal/email): <autorizacion><comprobante><![CDATA[...]]></comprobante></autorizacion>
+    outer_tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
+    if outer_tag in ("autorizacion", "autorizaciones"):
+        comp_el = root.find(".//comprobante")
+        if comp_el is None or not (comp_el.text or "").strip():
+            raise HTTPException(400, detail="XML de autorización SRI sin <comprobante> o vacío")
+        try:
+            root = ET.fromstring(comp_el.text.strip())
+        except ET.ParseError as exc:
+            raise HTTPException(400, detail=f"Comprobante interno inválido: {exc}")
+
+    tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
+    if tag not in ("factura", "notaCredito", "notaDebito", "liquidacion"):
+        raise HTTPException(
+            400,
+            detail=f"No es un comprobante SRI reconocido (tipo encontrado: '{tag}'). "
+                   "Sube el archivo .xml de la factura (no el PDF/RIDE).",
+        )
+
+    info_trib = root.find("infoTributaria")
+    info_fact = root.find("infoFactura") or root.find("infoNotaCredito") or root.find("infoLiquidacionCompra")
+    detalles_el = root.find("detalles")
+
+    if info_trib is None:
+        raise HTTPException(400, detail="El XML no tiene <infoTributaria>")
+
+    ruc          = _txt(info_trib, "ruc")
+    razon_social = _txt(info_trib, "razonSocial")
+    estab        = _txt(info_trib, "estab")
+    pto_emi      = _txt(info_trib, "ptoEmi")
+    secuencial   = _txt(info_trib, "secuencial")
+    numero       = f"{estab}-{pto_emi}-{secuencial}"
+
+    fecha_str = _txt(info_fact, "fechaEmision")
+    try:
+        fecha_emision = datetime.strptime(fecha_str, "%d/%m/%Y").date()
+    except ValueError:
+        fecha_emision = date.today()
+
+    try:
+        total_sin_imp = float(_txt(info_fact, "totalSinImpuestos", "0"))
+    except ValueError:
+        total_sin_imp = 0.0
+    try:
+        importe_total = float(_txt(info_fact, "importeTotal", "0"))
+    except ValueError:
+        importe_total = total_sin_imp
+
+    iva = round(importe_total - total_sin_imp, 2)
+
+    # Auto-match proveedor por RUC
+    proveedor_match = None
+    if ruc:
+        proveedor_match = db.execute(
+            select(Proveedor).where(Proveedor.ruc == ruc)
+        ).scalar_one_or_none()
+    proveedor_id = proveedor_match.id if proveedor_match else None
+
+    # Parsear items y hacer matching con inventario
+    items = []
+    if detalles_el is not None:
+        for det in detalles_el.findall("detalle"):
+            try:
+                cantidad = float(_txt(det, "cantidad", "0").replace(",", "."))
+                precio   = float(_txt(det, "precioUnitario", "0").replace(",", "."))
+                subtotal_item = float(_txt(det, "precioTotalSinImpuesto", str(cantidad * precio)).replace(",", "."))
+            except ValueError:
+                cantidad, precio, subtotal_item = 0, 0, 0
+
+            codigo_prov = _txt(det, "codigoPrincipal")
+            descripcion = _txt(det, "descripcion")
+            match_info  = _match_item(db, codigo_prov, descripcion, proveedor_id)
+
+            items.append({
+                "id":              None,
+                "codigo":          codigo_prov,
+                "descripcion":     descripcion,
+                "cantidad":        cantidad,
+                "precio_unitario": precio,
+                "subtotal":        subtotal_item,
+                **match_info,
+            })
+
+    cxp_id = None
+    ya_importado = False
+    if guardar:
+        dup_query = select(CuentaPorPagar).where(CuentaPorPagar.referencia == numero)
+        dup_query = dup_query.where(
+            CuentaPorPagar.proveedor_id == proveedor_id if proveedor_id else CuentaPorPagar.proveedor == razon_social
+        )
+        existing_cxp = db.execute(dup_query).scalar_one_or_none()
+
+        if existing_cxp:
+            ya_importado = True
+            cxp_id = existing_cxp.id
+            items = []
+        else:
+            cxp = CuentaPorPagar(
+                proveedor=razon_social if proveedor_match else f"{razon_social} (RUC {ruc})",
+                concepto=f"Factura #{numero}",
+                monto_total=importe_total,
+                monto_pagado=0,
+                fecha_emision=fecha_emision,
+                referencia=numero,
+                notas=f"Importado desde XML SRI. IVA: ${iva:.2f}",
+                proveedor_id=proveedor_id,
+                orden_id=orden_id,
+            )
+            db.add(cxp)
+            db.flush()  # get cxp.id before commit
+            for item in items:
+                cxp_item = CxPItem(
+                    cxp_id=cxp.id,
+                    codigo_proveedor=item["codigo"] or None,
+                    descripcion=item["descripcion"] or "—",
+                    cantidad=item["cantidad"],
+                    precio_unitario=item["precio_unitario"],
+                    subtotal=item["subtotal"],
+                    producto_id=item.get("producto_id"),
+                )
+                db.add(cxp_item)
+                db.flush()
+                item["id"] = cxp_item.id
+                if item.get("producto_id"):
+                    _aplicar_entrada_stock(db, item["producto_id"], item["cantidad"], numero, current.id)
+            db.commit()
+            db.refresh(cxp)
+            cxp_id = cxp.id
+
+    sin_match = sum(1 for i in items if i["match"] == "sin_match")
+    con_match = len(items) - sin_match
+
+    if ya_importado:
+        return {
+            "cxp_id": cxp_id, "proveedor": razon_social, "proveedor_id": proveedor_id,
+            "proveedor_nombre": proveedor_match.nombre if proveedor_match else None,
+            "ruc": ruc, "numero": numero, "fecha": fecha_emision.isoformat(),
+            "subtotal": total_sin_imp, "iva": iva, "total": importe_total,
+            "items": [], "guardado": False, "items_con_match": 0, "items_sin_match": 0,
+            "mensaje": f"Esta factura ({numero}) ya había sido importada antes — no se duplicó. Revisa Cuentas por Pagar.",
+        }
+
+    return {
+        "cxp_id":           cxp_id,
+        "proveedor":        razon_social,
+        "proveedor_id":     proveedor_id,
+        "proveedor_nombre": proveedor_match.nombre if proveedor_match else None,
+        "ruc":              ruc,
+        "numero":           numero,
+        "fecha":            fecha_emision.isoformat(),
+        "subtotal":         total_sin_imp,
+        "iva":              iva,
+        "total":            importe_total,
+        "items":            items,
+        "guardado":         guardar,
+        "items_con_match":  con_match,
+        "items_sin_match":  sin_match,
+        "mensaje":          f"Factura {numero} — {con_match}/{len(items)} ítems vinculados al inventario"
+                            + (f" — proveedor '{proveedor_match.nombre}'" if proveedor_match else ""),
+    }
+
+
+@router.delete("/items/{item_id}", status_code=204)
+def eliminar_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("admin", "cajero")),
+):
+    """Elimina un ítem de una factura importada (no afecta el total de la CxP)."""
+    item = db.get(CxPItem, item_id)
+    if not item:
+        raise HTTPException(404, detail="Ítem no encontrado")
+    db.delete(item)
+    db.commit()
+
+
+class NuevoItemIn(BaseModel):
+    cxp_id: int
+    codigo_proveedor: Optional[str] = None
+    descripcion: str
+    cantidad: float
+    precio_unitario: float
+
+
+@router.post("/items")
+def crear_item(
+    body: NuevoItemIn,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("admin", "cajero")),
+):
+    """Agrega un ítem manual a una factura ya importada (para desglosar líneas generalizadas
+    del proveedor, ej: "3 armazones" → armazón 1, armazón 2, armazón 3). No afecta el total de la CxP."""
+    cxp = db.get(CuentaPorPagar, body.cxp_id)
+    if not cxp:
+        raise HTTPException(404, detail="CxP no encontrada")
+    if body.cantidad <= 0:
+        raise HTTPException(422, detail="La cantidad debe ser positiva")
+
+    item = CxPItem(
+        cxp_id=body.cxp_id,
+        codigo_proveedor=body.codigo_proveedor.strip() if body.codigo_proveedor else None,
+        descripcion=body.descripcion.strip() or "—",
+        cantidad=body.cantidad,
+        precio_unitario=body.precio_unitario,
+        subtotal=round(body.cantidad * body.precio_unitario, 2),
+        producto_id=None,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {
+        "id": item.id,
+        "codigo": item.codigo_proveedor,
+        "descripcion": item.descripcion,
+        "cantidad": float(item.cantidad),
+        "precio_unitario": float(item.precio_unitario),
+        "subtotal": float(item.subtotal),
+        "match": "sin_match",
+        "producto_id": None,
+        "producto_nombre": None,
+        "producto_codigo": None,
+    }
+
+
+# ── Mapeos ─────────────────────────────────────────────────────────────────────
+
+class MapeoItem(BaseModel):
+    codigo_proveedor: str
+    descripcion_proveedor: Optional[str] = None
+    producto_id: int
+    proveedor_id: Optional[int] = None
+    item_id: Optional[int] = None
+
+
+class GuardarMapeosIn(BaseModel):
+    mapeos: list[MapeoItem]
+
+
+@router.post("/mapear-items")
+def guardar_mapeos(
+    body: GuardarMapeosIn,
+    db: Session = Depends(get_db),
+    current: User = Depends(require_roles("admin", "cajero")),
+):
+    """Guarda o actualiza mapeos codigo_proveedor → producto interno."""
+    guardados = 0
+    for m in body.mapeos:
+        if not m.codigo_proveedor or not m.producto_id:
+            continue
+        # Verificar que el producto existe
+        if not db.get(Producto, m.producto_id):
+            continue
+
+        # Si viene de un ítem concreto sin vincular todavía, vincularlo y sumar el stock
+        if m.item_id:
+            cxp_item = db.get(CxPItem, m.item_id)
+            if cxp_item and not cxp_item.producto_id:
+                cxp_item.producto_id = m.producto_id
+                cxp = db.get(CuentaPorPagar, cxp_item.cxp_id)
+                referencia = cxp.referencia if cxp else None
+                _aplicar_entrada_stock(db, m.producto_id, float(cxp_item.cantidad), referencia, current.id)
+
+        existing = db.execute(
+            select(ProveedorProductoMap).where(
+                ProveedorProductoMap.proveedor_id == m.proveedor_id,
+                ProveedorProductoMap.codigo_proveedor == m.codigo_proveedor,
+            )
+        ).scalar_one_or_none()
+
+        if existing:
+            existing.producto_id = m.producto_id
+            if m.descripcion_proveedor:
+                existing.descripcion_proveedor = m.descripcion_proveedor
+        else:
+            db.add(ProveedorProductoMap(
+                proveedor_id=m.proveedor_id,
+                codigo_proveedor=m.codigo_proveedor,
+                descripcion_proveedor=m.descripcion_proveedor,
+                producto_id=m.producto_id,
+            ))
+        guardados += 1
+
+    db.commit()
+    return {"guardados": guardados, "mensaje": f"{guardados} mapeo(s) guardados y stock actualizado"}
+
+
+@router.get("/mapeos")
+def listar_mapeos(
+    proveedor_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("admin")),
+):
+    """Lista mapeos existentes, opcionalmente filtrados por proveedor."""
+    stmt = select(ProveedorProductoMap)
+    if proveedor_id is not None:
+        stmt = stmt.where(ProveedorProductoMap.proveedor_id == proveedor_id)
+    rows = db.execute(stmt.order_by(ProveedorProductoMap.id.desc())).scalars().all()
+
+    result = []
+    for r in rows:
+        prod = db.get(Producto, r.producto_id)
+        result.append({
+            "id":                   r.id,
+            "proveedor_id":         r.proveedor_id,
+            "codigo_proveedor":     r.codigo_proveedor,
+            "descripcion_proveedor": r.descripcion_proveedor,
+            "producto_id":          r.producto_id,
+            "producto_nombre":      prod.nombre if prod else None,
+            "producto_codigo":      prod.codigo if prod else None,
+        })
+    return result
+
+
+@router.delete("/mapeos/{map_id}", status_code=status.HTTP_204_NO_CONTENT)
+def eliminar_mapeo(
+    map_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("admin", "cajero")),
+):
+    row = db.get(ProveedorProductoMap, map_id)
+    if not row:
+        raise HTTPException(404, detail="Mapeo no encontrado")
+    db.delete(row)
+    db.commit()

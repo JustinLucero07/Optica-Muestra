@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-optica}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-optica}
+      POSTGRES_DB: ${DB_NAME:-optica}
+    ports:
+      # Puerto en tu PC para conectarte con un cliente SQL (cámbialo con DB_PORT en .env)
+      - "127.0.0.1:${DB_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-optica} -d ${DB_NAME:-optica}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis-dev-pass}
+    # Sin puerto publicado: el backend lo usa por la red interna de Docker
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${DB_USER:-optica}:${DB_PASSWORD:-optica}@db:5432/${DB_NAME:-optica}
+      BACKEND_CORS_ORIGINS: '["http://localhost:5173","http://127.0.0.1:5173"]'
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  pgdata:
