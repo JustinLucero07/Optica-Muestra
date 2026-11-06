@@ -1,10 +1,11 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
+from app.core.security import huella_password
 from app.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -16,7 +17,12 @@ _TOKEN_ERROR = HTTPException(
 )
 
 
+# Con contraseña temporal solo se puede ver el perfil y cambiarla
+_PERMITIDO_CON_TEMPORAL = ("/api/v1/auth/me", "/api/v1/auth/cambiar-password", "/api/v1/configuracion")
+
+
 def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -29,12 +35,22 @@ def get_current_user(
             issuer=settings.JWT_ISSUER,
         )
         user_id = int(payload["sub"])
+        huella = payload["pv"]
     except (JWTError, ValueError, TypeError, KeyError):
         raise _TOKEN_ERROR
 
     user = db.get(User, user_id)
     if not user or not user.is_active:
         raise _TOKEN_ERROR
+    # La contraseña cambió después de emitir el token → sesión anulada
+    if huella != huella_password(user.password_hash):
+        raise _TOKEN_ERROR
+    if user.debe_cambiar_password and request.url.path not in _PERMITIDO_CON_TEMPORAL:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debes cambiar tu contraseña temporal antes de continuar",
+            headers={"X-Auth-Error": "cambiar_password"},
+        )
     return user
 
 

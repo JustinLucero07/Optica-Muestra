@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.deps import require_roles
 from app.core.auditoria import auditar
+from app.core.imagenes import validar_imagen
 from app.core.security import hash_password, validar_password_nueva
 from app.models.user import User
 from app.schemas.auth import UserCreate, UserUpdate, UserOut
@@ -63,7 +64,7 @@ def actualizar(uid: int, data: UserUpdate, db: Session = Depends(get_db), me: Us
         user.debe_cambiar_password = uid != me.id
         detalle.append("Contraseña restablecida")
     if data.firma_url is not None:
-        user.firma_url = data.firma_url or None
+        user.firma_url = validar_imagen(data.firma_url, max_mb=2)
     if detalle:
         auditar(db, me, "editar", "usuario", user.id, user.email, "; ".join(detalle))
     db.commit()

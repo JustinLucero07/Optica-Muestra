@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useAuthStore } from "@/store/auth"
-import { getMarcaLogo, getMarcaFooter } from "@/lib/pdf"
+import { esc, getMarcaLogo, getMarcaFooter, openPrintWindow } from "@/lib/pdf"
 import { useBrandStore } from "@/store/brand"
 
 function Fila({ label, valor }: { label: string; valor: string | number | boolean | null | undefined }) {
@@ -74,7 +74,7 @@ function fmtRx(v: unknown): string {
 }
 
 function printCertificado(c: ConsultaData, paciente: PacienteData | undefined, conMedidas: boolean, firma = "", optNombre = "", logo?: string | null) {
-  const nom = paciente ? `${(paciente.apellidos as string ?? "").toUpperCase()} ${(paciente.nombres as string ?? "").toUpperCase()}` : `Paciente #${c.paciente_id}`
+  const nom = paciente ? `${esc((paciente.apellidos as string ?? "").toUpperCase())} ${esc((paciente.nombres as string ?? "").toUpperCase())}` : `Paciente #${c.paciente_id}`
   const edad = calcEdad(paciente?.fecha_nacimiento as string | undefined)
   const edadNum = edad ? edad.replace(" años","") : ""
   const fechaTexto = fmtFechaCert(c.fecha as string)
@@ -159,7 +159,7 @@ function printCertificado(c: ConsultaData, paciente: PacienteData | undefined, c
 
   <div class="title">Certificado</div>
 
-  <p class="intro"><strong>Certificado de ${nom}</strong> con CI: ${paciente?.cedula ?? "—"}</p>
+  <p class="intro"><strong>Certificado de ${nom}</strong> con CI: ${esc(String(paciente?.cedula ?? "—"))}</p>
   <p class="intro">${edadNum ? `Con la edad de: <strong>${edadNum} años</strong>, asistió` : "Asistió"} al examen Optométrico el día <strong>${fechaTexto}</strong></p>
   <p class="intro" style="margin-top:8px">El diagnóstico presente es de: &nbsp;
     <strong>OD:</strong> &nbsp;${(c as any).diag_od || (c.rx_od_esf != null ? "AMETROPÍA" : "EMETROPE.")}&nbsp;&nbsp;&nbsp;&nbsp;
@@ -194,7 +194,7 @@ function printCertificado(c: ConsultaData, paciente: PacienteData | undefined, c
 
   ${observaciones ? `<div class="obs">
     <div class="obs-title">Observaciones</div>
-    <div class="obs-text">${observaciones}</div>
+    <div class="obs-text">${esc(observaciones)}</div>
   </div>` : ""}
 
   <div class="firma-section">
@@ -206,10 +206,9 @@ function printCertificado(c: ConsultaData, paciente: PacienteData | undefined, c
   </div>
 
   ${getMarcaFooter(logo)}
-  <script>window.onload=()=>window.print()</script></body></html>`
+  </body></html>`
 
-  const w = window.open("", "_blank", "width=700,height=900")
-  if (w) { w.document.write(html); w.document.close() }
+  openPrintWindow(html, 700, 900)
 }
 
 export default function ConsultaDetalle() {
@@ -249,7 +248,7 @@ export default function ConsultaDetalle() {
 
   const recLC = c.recetas?.find((r: { tipo: string }) => r.tipo === "lente_convencional")
   const recCL = c.recetas?.find((r: { tipo: string }) => r.tipo === "contactologia")
-  const nombrePac = paciente ? `${paciente.apellidos}, ${paciente.nombres}` : `Paciente #${c.paciente_id}`
+  const nombrePac = paciente ? `${esc(paciente.apellidos)}, ${esc(paciente.nombres)}` : `Paciente #${c.paciente_id}`
 
   return (
     <div className="p-3 sm:p-6 space-y-6">

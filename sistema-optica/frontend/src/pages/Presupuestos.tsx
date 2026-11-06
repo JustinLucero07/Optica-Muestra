@@ -102,7 +102,7 @@ function imprimir(p: Presupuesto) {
   ${p.notas ? `<div class="doc-section"><div class="doc-section-title">Observaciones</div><p style="font-size:11px;white-space:pre-line">${esc(p.notas)}</p></div>` : ""}
 </div>
 ${getMarcaFooter(logo)}
-<script>window.onload=()=>window.print()</script></body></html>`
+</body></html>`
   openPrintWindow(html, 760, 960)
 }
 

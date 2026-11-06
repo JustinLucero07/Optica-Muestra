@@ -46,7 +46,7 @@ class Api:
         self.token: str | None = None
 
     def como(self, user) -> "Api":
-        self.token = create_access_token(user.id, user.role.value)
+        self.token = create_access_token(user.id, user.role.value, user.password_hash)
         return self
 
     def _h(self) -> dict:

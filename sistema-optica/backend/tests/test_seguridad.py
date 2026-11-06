@@ -30,10 +30,40 @@ def test_contrasena_temporal_y_cambio(client, admin):
     login = ok(client.post("/api/v1/auth/login", json={"email": "temp@optica.local", "password": "Temporal123"}))
     assert login["user"]["debe_cambiar_password"] is True
     h = {"Authorization": f"Bearer {login['access_token']}"}
+    # Con la temporal no puede usar el sistema hasta cambiarla
+    assert client.get("/api/v1/pacientes", headers=h).status_code == 403
+    assert client.get("/api/v1/auth/me", headers=h).status_code == 200
     assert client.post("/api/v1/auth/cambiar-password", json={"actual": "mal", "nueva": "Nueva2026x"}, headers=h).status_code == 400
+    assert client.post("/api/v1/auth/cambiar-password", json={"actual": "Temporal123", "nueva": "12345678"}, headers=h).status_code == 422
     r = ok(client.post("/api/v1/auth/cambiar-password", json={"actual": "Temporal123", "nueva": "Nueva2026x"}, headers=h))
-    assert r["debe_cambiar_password"] is False
-    assert client.post("/api/v1/auth/login", json={"email": "temp@optica.local", "password": "Nueva2026x"}).status_code == 200
+    assert r["user"]["debe_cambiar_password"] is False
+    # El token viejo queda anulado; el nuevo funciona
+    assert client.get("/api/v1/auth/me", headers=h).status_code == 401
+    h2 = {"Authorization": f"Bearer {r['access_token']}"}
+    assert client.get("/api/v1/pacientes", headers=h2).status_code == 200
+    # Email sin importar mayúsculas
+    assert client.post("/api/v1/auth/login", json={"email": " TEMP@optica.local ", "password": "Nueva2026x"}).status_code == 200
+
+
+def test_login_robusto(client):
+    for pw in ("x" * 100, "", "' OR '1'='1"):
+        assert client.post("/api/v1/auth/login", json={"email": "admin@optica.local", "password": pw}).status_code == 401
+    r = client.post("/api/v1/auth/login", json={"email": "' OR 1=1 --", "password": "' OR '1'='1"})
+    assert r.status_code == 401
+
+
+def test_tokens_falsos_rechazados(client, tokens):
+    from jose import jwt
+    uid, real = tokens["admin"]
+    # firmado con otra clave
+    falso = jwt.encode({"sub": str(uid), "aud": "optica-frontend", "iss": "optica-api", "pv": "x"}, "otra-clave", algorithm="HS256")
+    # algoritmo "none"
+    cab, cuerpo, _ = real.split(".")
+    import base64, json
+    sin_firma = base64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).decode().rstrip("=") + "." + cuerpo + "."
+    for t in (falso, sin_firma, "basura", real[:-3] + "abc"):
+        assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {t}"}).status_code == 401, t
+    assert client.get("/api/v1/pacientes").status_code == 401
 
 
 def test_acciones_sensibles_quedan_en_el_historial(admin, paciente):

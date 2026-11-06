@@ -9,7 +9,9 @@ from app.core.limiter import SLOWAPI_AVAILABLE, limiter
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
+# En producción no se publica la documentación interactiva del API
+_docs = {} if not settings.es_produccion else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION, **_docs)
 
 # Rate limiter (activo solo si slowapi está instalado)
 if SLOWAPI_AVAILABLE:
@@ -27,6 +29,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+@app.middleware("http")
+async def cabeceras_seguridad(request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.url.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")  # datos de pacientes y dinero
+    return resp
+
 
 app.include_router(api_router)
 

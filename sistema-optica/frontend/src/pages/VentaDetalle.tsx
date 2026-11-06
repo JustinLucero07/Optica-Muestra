@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { getMarcaFooter, PDF_BASE_CSS, openPrintWindow, getMarcaLogo } from "@/lib/pdf"
+import { esc, getMarcaFooter, PDF_BASE_CSS, openPrintWindow, getMarcaLogo } from "@/lib/pdf"
 import { fmtDate, hoyISO, fmtMoney } from "@/lib/format"
 import { estadoLabel } from "@/lib/estados"
 
@@ -37,7 +37,7 @@ interface CuentaBancaria { id: number; nombre: string; tipo: string; activa: boo
 async function printComprobante(v: Venta, pac: Paciente | null, abonado: number) {
   const logo = (await import("@/store/brand")).useBrandStore.getState().logo
   const pendiente = Math.max(0, Number(v.total) - abonado)
-  const nombre = pac ? `${pac.apellidos} ${pac.nombres}` : "—"
+  const nombre = pac ? `${esc(pac.apellidos)} ${esc(pac.nombres)}` : "—"
   const cedula = pac?.cedula ?? "—"
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Comprobante ${v.numero}</title>
 <style>${PDF_BASE_CSS}
@@ -61,9 +61,9 @@ async function printComprobante(v: Venta, pac: Paciente | null, abonado: number)
   <div class="doc-section">
     <div class="doc-section-title">Datos del cliente</div>
     <div class="doc-grid">
-      <span class="lbl">Nombre</span><span class="val">${nombre}</span>
-      <span class="lbl">Cédula</span><span class="val">${cedula}</span>
-      ${pac?.telefono ? `<span class="lbl">Teléfono</span><span class="val">${pac.telefono}</span>` : ""}
+      <span class="lbl">Nombre</span><span class="val">${esc(nombre)}</span>
+      <span class="lbl">Cédula</span><span class="val">${esc(cedula)}</span>
+      ${pac?.telefono ? `<span class="lbl">Teléfono</span><span class="val">${esc(pac.telefono)}</span>` : ""}
     </div>
   </div>
 
@@ -75,7 +75,7 @@ async function printComprobante(v: Venta, pac: Paciente | null, abonado: number)
       </tr></thead>
       <tbody>
         ${v.items.map(it => `<tr>
-          <td>${it.descripcion}</td>
+          <td>${esc(it.descripcion)}</td>
           <td style="text-align:center">${it.cantidad}</td>
           <td style="text-align:right">${fmtMoney(Number(it.precio_unitario))}</td>
           <td style="text-align:right">${it.descuento_pct > 0 ? it.descuento_pct + "%" : "—"}</td>
@@ -106,7 +106,7 @@ async function printComprobante(v: Venta, pac: Paciente | null, abonado: number)
 </div>
 
 ${getMarcaFooter(logo)}
-<script>window.onload=()=>window.print()</script></body></html>`
+</body></html>`
 
   openPrintWindow(html, 860, 960)
 }

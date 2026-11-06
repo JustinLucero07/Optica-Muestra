@@ -2,8 +2,8 @@
 // Los datos (nombre, dirección, teléfonos) salen de Configuración → ver lib/negocio.ts
 import { getNegocio } from "@/lib/negocio"
 
-const esc = (v: string) =>
-  v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+export const esc = (v: string | number | null | undefined) =>
+  String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;")
 
 // Isotipo genérico: gafas estilizadas (mismo dibujo que components/Logo.tsx)
 const LOGO_SVG = `<svg width="46" height="46" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -117,14 +117,46 @@ export const PDF_BASE_CSS = `
 
 const PRINT_WIN_NAME = "optica_print_window"
 
-export function openPrintWindow(html: string, width = 860, height = 960) {
+/**
+ * Limpia el HTML de un documento antes de mostrarlo: quita <script>, atributos
+ * on* (onerror, onclick…), enlaces javascript: y etiquetas peligrosas.
+ * Los documentos incluyen textos escritos por usuarios (nombres, notas…); sin esto
+ * un nombre de paciente como `<img src=x onerror=…>` ejecutaría código con la
+ * sesión de quien imprime.
+ */
+export function sanitizarHtml(html: string): string {
+  const doc = new DOMParser().parseFromString(html, "text/html") // no ejecuta nada
+  doc.querySelectorAll("script,iframe,frame,object,embed,base,form,link,meta[http-equiv]").forEach(e => e.remove())
+  doc.querySelectorAll("*").forEach(el => {
+    for (const a of Array.from(el.attributes)) {
+      const n = a.name.toLowerCase()
+      const v = a.value.replace(/[\s\u0000-\u001F]/g, "").toLowerCase()
+      if (n.startsWith("on") || n === "srcdoc" || n === "formaction" ||
+          ((n === "href" || n === "src" || n === "xlink:href" || n === "action") &&
+           (v.startsWith("javascript:") || v.startsWith("vbscript:") || (v.startsWith("data:") && !v.startsWith("data:image/"))))) {
+        el.removeAttribute(a.name)
+      }
+    }
+  })
+  return "<!DOCTYPE html>" + doc.documentElement.outerHTML
+}
+
+/** Abre el documento en una ventana y lanza la impresión (desde aquí, no con un script dentro del HTML). */
+export function openPrintWindow(html: string, width = 860, height = 960, opciones: { cerrarAlImprimir?: boolean } = {}) {
   // Reuse the same named window so repeated prints don't pile up
-  let w = window.open("", PRINT_WIN_NAME, `width=${width},height=${height}`)
+  const w = window.open("", PRINT_WIN_NAME, `width=${width},height=${height}`)
   if (!w) return
   w.document.open()
-  w.document.write(html)
+  w.document.write(sanitizarHtml(html))
   w.document.close()
   w.focus()
+  const imprimir = () => {
+    if (opciones.cerrarAlImprimir) w.onafterprint = () => w.close()
+    w.print()
+  }
+  // Esperar a que carguen imágenes (logo, firma) antes de imprimir
+  if (w.document.readyState === "complete") setTimeout(imprimir, 250)
+  else w.addEventListener("load", () => setTimeout(imprimir, 50), { once: true })
 }
 
 /**
@@ -142,7 +174,7 @@ export async function downloadHtmlAsPdf(html: string, filename: string): Promise
   const wrapper = document.createElement("div")
   wrapper.style.cssText = "position:fixed;left:-9999px;top:0;width:860px;background:#fff;z-index:-1"
   // Strip auto-print scripts to avoid popups
-  wrapper.innerHTML = html.replace(/<script[\s\S]*?<\/script>/gi, "")
+  wrapper.innerHTML = sanitizarHtml(html)
   document.body.appendChild(wrapper)
 
   try {

@@ -15,7 +15,7 @@ import { Dialog, DialogHeader, DialogBody, DialogFooter } from "@/components/ui/
  * hasta cambiarla; la única salida es cerrar sesión.
  */
 export default function CambiarPasswordDialog({ open, forzado, onClose }: { open: boolean; forzado: boolean; onClose: () => void }) {
-  const { updateUser, logout } = useAuthStore()
+  const { setSession, logout } = useAuthStore()
   const [actual, setActual] = useState("")
   const [nueva, setNueva] = useState("")
   const [repetir, setRepetir] = useState("")
@@ -39,8 +39,9 @@ export default function CambiarPasswordDialog({ open, forzado, onClose }: { open
     if (!valido) return
     setGuardando(true)
     try {
-      await api.post("/auth/cambiar-password", { actual, nueva })
-      updateUser({ debe_cambiar_password: false })
+      // El backend anula el token anterior y devuelve uno nuevo
+      const { data } = await api.post("/auth/cambiar-password", { actual, nueva })
+      setSession(data.access_token, data.user, !!localStorage.getItem("optica-auth"))
       toast.success("Contraseña actualizada")
       setActual(""); setNueva(""); setRepetir("")
       onClose()

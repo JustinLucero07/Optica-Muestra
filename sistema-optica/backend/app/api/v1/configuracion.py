@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.auditoria import auditar, cambios
 from app.core.deps import get_current_user, require_roles
+from app.core.imagenes import validar_imagen
 from app.models.configuracion import Configuracion
 from app.models.user import User
 
@@ -45,6 +46,8 @@ def set_config(
 ):
     if clave not in CLAVES_PERMITIDAS:
         raise HTTPException(400, detail=f"Clave '{clave}' no permitida")
+    if clave in ("logo", "firma_electronica"):
+        data.valor = validar_imagen(data.valor) or ""
     row = db.execute(select(Configuracion).where(Configuracion.clave == clave)).scalar_one_or_none()
     if row:
         row.valor = data.valor

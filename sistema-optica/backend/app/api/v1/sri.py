@@ -118,6 +118,17 @@ def _aplicar_entrada_stock(db: Session, producto_id: int, cantidad: float, refer
     ))
 
 
+_MAX_XML = 2 * 1024 * 1024
+
+
+def _rechazar_dtd(datos: bytes) -> None:
+    """Una factura del SRI nunca trae DOCTYPE ni ENTITY: si los trae se rechaza
+    (evita ataques XXE / "billion laughs" con XML manipulado)."""
+    d = datos.upper()
+    if b"<!DOCTYPE" in d or b"<!ENTITY" in d:
+        raise HTTPException(400, detail="XML no permitido (contiene DOCTYPE/ENTITY)")
+
+
 @router.post("/importar-xml")
 async def importar_xml(
     file: UploadFile = File(...),
@@ -126,7 +137,10 @@ async def importar_xml(
     db: Session = Depends(get_db),
     current: User = Depends(require_roles("admin", "cajero")),
 ):
-    content = await file.read()
+    content = await file.read(_MAX_XML + 1)
+    if len(content) > _MAX_XML:
+        raise HTTPException(413, detail="El XML es demasiado grande (máximo 2 MB)")
+    _rechazar_dtd(content)
     try:
         root = ET.fromstring(content)
     except ET.ParseError as exc:
@@ -140,6 +154,7 @@ async def importar_xml(
         comp_el = root.find(".//comprobante")
         if comp_el is None or not (comp_el.text or "").strip():
             raise HTTPException(400, detail="XML de autorización SRI sin <comprobante> o vacío")
+        _rechazar_dtd(comp_el.text.encode())
         try:
             root = ET.fromstring(comp_el.text.strip())
         except ET.ParseError as exc:

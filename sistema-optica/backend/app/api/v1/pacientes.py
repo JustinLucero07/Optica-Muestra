@@ -7,6 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.deps import get_current_user, require_roles
+from app.core.imagenes import validar_imagen
 from app.core.db import get_db
 from app.core.numeradores import siguiente_numero
 from app.models.nota import PacienteNota
@@ -167,7 +168,7 @@ def guardar_foto(
     p = db.get(Paciente, pid)
     if not p:
         raise HTTPException(404, detail="Paciente no encontrado")
-    p.foto = data.foto
+    p.foto = validar_imagen(data.foto)
     db.commit()
     db.refresh(p)
     return p

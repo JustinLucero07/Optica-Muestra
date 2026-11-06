@@ -70,7 +70,10 @@ def tokens(base_de_pruebas):
 
     with SessionLocal() as db:
         users = db.execute(select(User)).scalars().all()
-        return {u.role.value: (u.id, create_access_token(u.id, u.role.value)) for u in users}
+        for u in users:  # el seed las crea como temporales
+            u.debe_cambiar_password = False
+        db.commit()
+        return {u.role.value: (u.id, create_access_token(u.id, u.role.value, u.password_hash)) for u in users}
 
 
 class Api:

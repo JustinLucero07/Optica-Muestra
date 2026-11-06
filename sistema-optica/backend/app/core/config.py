@@ -60,17 +60,21 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASS: str = ""
 
+    @property
+    def es_produccion(self) -> bool:
+        return self.ENV.lower() in ("prod", "production", "produccion")
+
     @model_validator(mode="after")
     def validate_secrets(self) -> "Settings":
-        if self.ENV == "prod":
-            if self.JWT_SECRET.startswith("dev-") or len(self.JWT_SECRET) < 32:
+        if self.es_produccion:
+            # Con la clave de ejemplo o vacía cualquiera podría fabricar un token de admin
+            s = self.JWT_SECRET
+            if (len(s) < 32 or s.startswith("dev-") or "CAMBIA" in s.upper()
+                    or len(set(s)) < 10):
                 raise ValueError(
-                    "JWT_SECRET debe ser un secreto aleatorio de al menos 32 caracteres en producción. "
+                    "JWT_SECRET debe ser un secreto aleatorio de al menos 32 caracteres en producción "
+                    "(no el del archivo de ejemplo). "
                     "Genera uno con: python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
-                )
-            if any("localhost" in o or "127.0.0.1" in o for o in self.BACKEND_CORS_ORIGINS):
-                raise ValueError(
-                    "BACKEND_CORS_ORIGINS no puede contener localhost en producción."
                 )
         return self
 

@@ -1,5 +1,5 @@
 // Documentos de la orden: PDF para el laboratorio, etiqueta, aceptación del paciente y envío por WhatsApp.
-import { getMarcaFooter, PDF_BASE_CSS, openPrintWindow, getMarcaLogo, downloadHtmlAsPdf } from "@/lib/pdf"
+import { esc, getMarcaFooter, PDF_BASE_CSS, openPrintWindow, getMarcaLogo, downloadHtmlAsPdf } from "@/lib/pdf"
 import { parsePrescripcion } from "@/lib/rx"
 import { useBrandStore } from "@/store/brand"
 import { getNegocio } from "@/lib/negocio"
@@ -7,7 +7,7 @@ import { fmtDate } from "@/lib/format"
 import { Orden } from "@/pages/ordenes/tipos"
 
 // ─── PDF: Orden para lab ──────────────────────────────────────────────────────
-export function buildOrdenHtml(orden: Orden, pacNombre: string, logo?: string | null, forPrint = false): string {
+export function buildOrdenHtml(orden: Orden, pacNombre: string, logo?: string | null): string {
   const rx = parsePrescripcion(orden.descripcion)
   const fmtRxVal = (v: string) => {
     if (!v) return "—"
@@ -48,7 +48,7 @@ export function buildOrdenHtml(orden: Orden, pacNombre: string, logo?: string | 
   <div class="doc-body">
     <div class="doc-section">
       <div class="doc-grid" style="grid-template-columns:80px 1fr 80px 1fr">
-        <span class="lbl">Paciente</span><span class="val"><strong>${pacNombre}</strong></span>
+        <span class="lbl">Paciente</span><span class="val"><strong>${esc(pacNombre)}</strong></span>
         <span class="lbl">Laboratorio</span><span class="val"><strong>${orden.lab_proveedor}</strong></span>
         <span class="lbl">Tipo</span><span class="val">${orden.tipo}</span>
         <span class="lbl">Entrega est.</span><span class="val">${orden.fecha_entrega_est ? fmtDate(orden.fecha_entrega_est) : "—"}</span>
@@ -77,18 +77,17 @@ export function buildOrdenHtml(orden: Orden, pacNombre: string, logo?: string | 
       </table>
     </div>
     <div class="extras">
-      <div><div class="l">Diseño del lente</div>${rx.diseno || "—"}</div>
-      <div><div class="l">Tratamiento</div>${rx.tratamiento || "—"}</div>
-      <div><div class="l">Material</div>${rx.material || "—"}</div>
+      <div><div class="l">Diseño del lente</div>${esc(rx.diseno || "—")}</div>
+      <div><div class="l">Tratamiento</div>${esc(rx.tratamiento || "—")}</div>
+      <div><div class="l">Material</div>${esc(rx.material || "—")}</div>
     </div>
-    ${rx.diagnostico ? `<div class="doc-section" style="margin-top:6px"><span style="font-weight:600;color:#374151">Diagnóstico: </span>${rx.diagnostico}</div>` : ""}
+    ${rx.diagnostico ? `<div class="doc-section" style="margin-top:6px"><span style="font-weight:600;color:#374151">Diagnóstico: </span>${esc(rx.diagnostico)}</div>` : ""}
   </div>
-  ${forPrint ? "<script>window.print();window.onafterprint=()=>window.close();</script>" : ""}
   </body></html>`
 }
 
 export function printOrden(orden: Orden, pacNombre: string, logo?: string | null) {
-  openPrintWindow(buildOrdenHtml(orden, pacNombre, logo, true), 820, 900)
+  openPrintWindow(buildOrdenHtml(orden, pacNombre, logo), 820, 900, { cerrarAlImprimir: true })
 }
 
 // ─── PDF: Etiqueta de lente ───────────────────────────────────────────────────
@@ -116,20 +115,16 @@ export function printEtiqueta(orden: Orden, pacNombre: string) {
     @media print{@page{size:90mm 50mm;margin:0}body{padding:4mm}}
   </style></head><body>
   <div class="num">${orden.numero}</div>
-  <div class="pac">${pacNombre}</div>
+  <div class="pac">${esc(pacNombre)}</div>
   <div class="rx">
     <div><span>OD:</span>${odParts || "—"}</div>
     <div><span>OI:</span>${oiParts || "—"}</div>
-    ${rx.diseno ? `<div><span>Diseño:</span>${rx.diseno}</div>` : ""}
-    ${rx.material ? `<div><span>Mat:</span>${rx.material}</div>` : ""}
+    ${rx.diseno ? `<div><span>Diseño:</span>${esc(rx.diseno)}</div>` : ""}
+    ${rx.material ? `<div><span>Mat:</span>${esc(rx.material)}</div>` : ""}
   </div>
-  <div class="footer">${getNegocio().nombre} · ${new Date().toLocaleDateString("es-EC")}</div>
-  <script>window.print();window.onafterprint=()=>window.close();</script>
+  <div class="footer">${esc(getNegocio().nombre)} · ${new Date().toLocaleDateString("es-EC")}</div>
   </body></html>`
-  const w = window.open("", "_blank", "width=400,height=300")
-  if (!w) return
-  w.document.write(html)
-  w.document.close()
+  openPrintWindow(html, 400, 300, { cerrarAlImprimir: true })
 }
 
 // ─── PDF: Aceptación entrega de lentes ───────────────────────────────────────
@@ -156,7 +151,7 @@ export function printAceptacion(orden: Orden, pacNombre: string, firma = "", log
     <div class="doc-section">
       <div class="doc-section-title">Datos del cliente</div>
       <div class="doc-grid">
-        <span class="lbl">Paciente</span><span class="val"><strong>${pacNombre}</strong></span>
+        <span class="lbl">Paciente</span><span class="val"><strong>${esc(pacNombre)}</strong></span>
         <span class="lbl">Lab / Proveedor</span><span class="val">${orden.lab_proveedor}</span>
         <span class="lbl">Tipo de lente</span><span class="val">${orden.tipo}</span>
         <span class="lbl">Fecha de entrega</span><span class="val">${new Date().toLocaleDateString("es-EC")}</span>
@@ -175,9 +170,9 @@ export function printAceptacion(orden: Orden, pacNombre: string, firma = "", log
         </tbody>
       </table>
       <div class="doc-grid" style="margin-top:8px">
-        ${rx.material ? `<span class="lbl">Material</span><span class="val">${rx.material}</span>` : ""}
+        ${rx.material ? `<span class="lbl">Material</span><span class="val">${esc(rx.material)}</span>` : ""}
         ${rx.tratamiento ? `<span class="lbl">Tratamiento</span><span class="val">${rx.tratamiento}</span>` : ""}
-        ${rx.diseno ? `<span class="lbl">Diseño</span><span class="val">${rx.diseno}</span>` : ""}
+        ${rx.diseno ? `<span class="lbl">Diseño</span><span class="val">${esc(rx.diseno)}</span>` : ""}
       </div>
     </div>
     <div class="doc-section">
@@ -193,13 +188,12 @@ export function printAceptacion(orden: Orden, pacNombre: string, firma = "", log
         <div class="firma-box"><div class="line"></div><p>Cédula / Documento</p></div>
         <div class="firma-box">
           ${firma ? `<img src="${firma}" />` : `<div class="line"></div>`}
-          <p>Responsable ${getNegocio().nombre}</p>
+          <p>Responsable ${esc(getNegocio().nombre)}</p>
         </div>
       </div>
     </div>
   </div>
   ${getMarcaFooter(logo)}
-  <script>window.onload=()=>window.print()</script>
   </body></html>`
 
   openPrintWindow(html, 780, 920)

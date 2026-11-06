@@ -1,13 +1,13 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.models.user import UserRole
 
 
 class LoginRequest(BaseModel):
-    email: str  # str simple — la validación de formato es responsabilidad del frontend
-    password: str
+    email: str = Field(..., max_length=255)  # el formato lo valida el frontend
+    password: str = Field(..., max_length=200)
 
 
 class UserPublic(BaseModel):
@@ -28,8 +28,8 @@ class TokenResponse(BaseModel):
 
 
 class CambioPassword(BaseModel):
-    actual: str
-    nueva: str
+    actual: str = Field(..., max_length=200)
+    nueva: str = Field(..., max_length=200)
 
 
 class UserCreate(BaseModel):

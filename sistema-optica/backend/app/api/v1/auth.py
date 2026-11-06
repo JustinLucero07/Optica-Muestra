@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -85,11 +85,13 @@ def _clear_attempts(email: str) -> None:
 @router.post("/login", response_model=TokenResponse)
 @limiter.limit("20/minute")
 def login(request: Request, data: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
-    _check_lockout(data.email)
+    email = data.email.strip().lower()
+    _check_lockout(email)
 
-    user = db.execute(select(User).where(User.email == data.email)).scalar_one_or_none()
-    if not user or not verify_password(data.password, user.password_hash):
-        _record_failure(data.email)
+    user = db.execute(select(User).where(func.lower(User.email) == email)).scalar_one_or_none()
+    # verify_password siempre calcula un bcrypt (aunque el usuario no exista)
+    if not verify_password(data.password, user.password_hash if user else None) or not user:
+        _record_failure(email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email o contraseña incorrectos",
@@ -100,8 +102,8 @@ def login(request: Request, data: LoginRequest, db: Session = Depends(get_db)) -
             detail="Usuario inactivo. Contacta al administrador.",
         )
 
-    _clear_attempts(data.email)
-    token = create_access_token(user.id, user.role.value)
+    _clear_attempts(email)
+    token = create_access_token(user.id, user.role.value, user.password_hash)
     return TokenResponse(access_token=token, user=UserPublic.model_validate(user))
 
 
@@ -123,7 +125,7 @@ def listar_personal(
 
 
 
-@router.post("/cambiar-password", response_model=UserPublic)
+@router.post("/cambiar-password", response_model=TokenResponse)
 @limiter.limit("10/minute")
 def cambiar_password(
     request: Request,
@@ -142,4 +144,8 @@ def cambiar_password(
     auditar(db, user, "cambiar_password", "usuario", user.id, user.email)
     db.commit()
     db.refresh(user)
-    return user
+    # El token anterior queda anulado (cambió la huella): se entrega uno nuevo
+    return TokenResponse(
+        access_token=create_access_token(user.id, user.role.value, user.password_hash),
+        user=UserPublic.model_validate(user),
+    )

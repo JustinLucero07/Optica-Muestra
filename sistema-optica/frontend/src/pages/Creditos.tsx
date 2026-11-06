@@ -10,7 +10,7 @@ import { api } from "@/lib/api"
 import { errMsg } from "@/lib/errors"
 import { deleteWithUndo } from "@/lib/confirm"
 import { cuentasParaMetodo, cuentaPorDefecto, METODOS_PAGO, metodoLabel } from "@/lib/metodosCuenta"
-import { getMarcaFooter, PDF_BASE_CSS, openPrintWindow, getMarcaLogo } from "@/lib/pdf"
+import { esc, getMarcaFooter, PDF_BASE_CSS, openPrintWindow, getMarcaLogo } from "@/lib/pdf"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -70,7 +70,7 @@ async function printComprobante(credito: Credito, cuotas: Cuota[], montoTotal: n
   <div class="doc-section">
     <div class="doc-section-title">Detalle del pago</div>
     <div class="doc-grid">
-      <span class="lbl">Paciente</span><span class="val"><strong>${credito.paciente_nombre ?? "—"}</strong></span>
+      <span class="lbl">Paciente</span><span class="val"><strong>${esc(credito.paciente_nombre ?? "—")}</strong></span>
       <span class="lbl">Crédito N°</span><span class="val">${credito.numero}</span>
       <span class="lbl">Cuota${cuotas.length > 1 ? "s" : ""}</span><span class="val">${rango} de ${credito.numero_cuotas}</span>
       <span class="lbl">Vencimiento</span><span class="val">${fmtDate(primera.fecha_vencimiento)}</span>
@@ -91,13 +91,12 @@ async function printComprobante(credito: Credito, cuotas: Cuota[], montoTotal: n
       <div class="firma-box"><div class="line"></div><p>Firma del cliente</p></div>
       <div class="firma-box">
         ${firma ? `<img src="${firma}" />` : `<div class="line"></div>`}
-        <p>Responsable ${getNegocio().nombre}</p>
+        <p>Responsable ${esc(getNegocio().nombre)}</p>
       </div>
     </div>
   </div>
 </div>
 ${getMarcaFooter(logo)}
-<script>window.onload=()=>window.print()</script>
 </body></html>`
   openPrintWindow(html, 520, 700)
 }
@@ -128,7 +127,7 @@ async function printAceptacionCredito(credito: Credito, productos: string, firma
   <div class="doc-section">
     <div class="doc-section-title">Datos del cliente</div>
     <div class="doc-grid">
-      <span class="lbl">Nombre del cliente</span><span class="val"><strong>${credito.paciente_nombre ?? "—"}</strong></span>
+      <span class="lbl">Nombre del cliente</span><span class="val"><strong>${esc(credito.paciente_nombre ?? "—")}</strong></span>
       <span class="lbl">Fecha</span><span class="val">${fmtDate(credito.fecha_inicio)}</span>
     </div>
   </div>
@@ -142,14 +141,14 @@ async function printAceptacionCredito(credito: Credito, productos: string, firma
       <span class="lbl">Método acordado</span><span class="val">PAGO A ${credito.numero_cuotas} CUOTAS — ${credito.periodicidad.toUpperCase()}</span>
       <span class="lbl">Número de cuotas</span><span class="val">${credito.numero_cuotas}</span>
       <span class="lbl">Valor por cuota</span><span class="val"><strong>$${cuotaValor}</strong></span>
-      ${credito.notas ? `<span class="lbl">Observaciones</span><span class="val">${credito.notas}</span>` : ""}
+      ${credito.notas ? `<span class="lbl">Observaciones</span><span class="val">${esc(credito.notas)}</span>` : ""}
     </div>
   </div>
   <div class="doc-section">
     <div class="doc-section-title">Declaración de aceptación</div>
     <div class="declaracion">
-      Yo, <strong>${credito.paciente_nombre ?? "___________________________"}</strong>, declaro que he recibido los productos detallados anteriormente y acepto adquirirlos bajo la modalidad de crédito, comprometiéndome a cancelar según lo acordado.<br><br>
-      Me comprometo a realizar los pagos en las fechas establecidas. En caso de incumplimiento, autorizo a ${getNegocio().nombre} a contactarme y proceder conforme a lo estipulado para el cumplimiento de la deuda.
+      Yo, <strong>${esc(credito.paciente_nombre ?? "___________________________")}</strong>, declaro que he recibido los productos detallados anteriormente y acepto adquirirlos bajo la modalidad de crédito, comprometiéndome a cancelar según lo acordado.<br><br>
+      Me comprometo a realizar los pagos en las fechas establecidas. En caso de incumplimiento, autorizo a ${esc(getNegocio().nombre)} a contactarme y proceder conforme a lo estipulado para el cumplimiento de la deuda.
     </div>
   </div>
   <div class="doc-section">
@@ -161,13 +160,12 @@ async function printAceptacionCredito(credito: Credito, productos: string, firma
       </div>
       <div class="firma-box">
         ${firma ? `<img src="${firma}" />` : `<div class="line"></div>`}
-        <p>Firma del Representante de ${getNegocio().nombre}</p>
+        <p>Firma del Representante de ${esc(getNegocio().nombre)}</p>
       </div>
     </div>
   </div>
 </div>
 ${getMarcaFooter(logo)}
-<script>window.onload=()=>window.print()</script>
 </body></html>`
   openPrintWindow(html, 720, 960)
 }

@@ -6,7 +6,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles
 from app.models.proveedor import Proveedor
 from app.models.user import User
 
@@ -130,7 +130,7 @@ def actualizar_proveedor(
 def eliminar_proveedor(
     proveedor_id: int,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_roles("admin")),
 ):
     p = db.get(Proveedor, proveedor_id)
     if not p:

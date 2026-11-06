@@ -110,7 +110,6 @@ export async function imprimirCierreCaja(caja: CajaTicket): Promise<void> {
   <div class="firma">Recibido por</div>
   <div class="sep"></div>
   <div class="c peq">Impreso ${fmtDate(isoLocal())} ${new Date().toTimeString().slice(0, 5)}${usuario ? ` por ${esc(usuario)}` : ""}</div>
-  <script>window.onload = () => window.print()</script>
 </body></html>`
   openPrintWindow(html, 420, 800)
 }
